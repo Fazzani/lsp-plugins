@@ -103,13 +103,23 @@ The audit does not install packages or change repository/client configuration.
 
 After updating this plugin, reload it or start a new session to discover the skill.
 
-## SessionStart reminder (Claude Code)
+## LSP-first hooks (Claude Code)
 
-Claude Code defers the `LSP` tool, so agents tend to fall back to the already
-loaded `Grep`. The plugin's `SessionStart` hook ([hooks/hooks.json](hooks/hooks.json))
-injects a short reminder listing the extensions whose server is on PATH and how to
-load the tool (`ToolSearch select:LSP`). It blocks nothing and stays silent when no
-configured server is installed. Codex and Copilot CLI do not use this hook.
+Claude Code defers the `LSP` tool and its system prompt steers agents to `Grep`, so
+an instruction alone rarely changes the first tool chosen. The plugin ships two hooks
+([hooks/hooks.json](hooks/hooks.json)); Codex and Copilot CLI do not use them. Both
+consider only servers found on PATH and do nothing when none is installed.
+
+- **SessionStart** injects a short reminder: load the tool with
+  `ToolSearch select:LSP`, locate the symbol with `workspaceSymbol`, then use
+  position-based operations (`findReferences`, `goToDefinition`, …) and trust them.
+- **PreToolUse on Grep** denies a code-symbol lookup in covered files (camelCase,
+  PascalCase compounds, snake_case, dotted names, `class X`, `X\(`, `: IX`, or an
+  alternation of those) and names the LSP calls to make instead. Literal text,
+  real regexes, `-i` searches, `SCREAMING_SNAKE`, `TODO`, non-code globs or paths,
+  `docs/`, YAML and Razor pass. Each identical call is denied **once per session**:
+  repeating it unchanged runs the literal search. State lives in
+  `<tmp>/local-lsp-guard/<session_id>.json`. Any guard error allows the call.
 
 ## Configuration and verification
 
