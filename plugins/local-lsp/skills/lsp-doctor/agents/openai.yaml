@@ -1,0 +1,4 @@
+interface:
+  display_name: "LSP doctor"
+  short_description: "Vérifier les LSP nécessaires au dépôt courant"
+  default_prompt: "Utilise $lsp-doctor pour vérifier les LSP, leur configuration et la navigation sémantique dans ce dépôt."

@@ -1,0 +1,12 @@
+{
+  "name": "local-lsp",
+  "owner": { "name": "Heni FAZZANI" },
+  "plugins": [
+    {
+      "name": "local-lsp",
+      "description": "Local C#, Terraform, TypeScript/JavaScript, Python, YAML and Dart language servers",
+      "version": "1.1.1",
+      "source": "./plugins/local-lsp"
+    }
+  ]
+}

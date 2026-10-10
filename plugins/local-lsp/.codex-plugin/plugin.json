@@ -1,0 +1,18 @@
+{
+  "name": "local-lsp",
+  "version": "1.1.1",
+  "description": "Local C#, Terraform, TypeScript/JavaScript, Python, YAML and Dart language servers",
+  "author": { "name": "Heni FAZZANI" },
+  "skills": "./skills/",
+  "mcpServers": {
+    "local-lsp": {
+      "command": "local-lsp-mcp",
+      "startup_timeout_sec": 20,
+      "tool_timeout_sec": 120
+    }
+  },
+  "interface": {
+    "displayName": "Local LSP",
+    "shortDescription": "Semantic navigation through local language servers"
+  }
+}

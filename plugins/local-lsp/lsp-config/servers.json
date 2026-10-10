@@ -1,0 +1,72 @@
+{
+  "lspServers": {
+    "csharp": {
+      "command": "roslyn-language-server",
+      "args": [
+        "--stdio",
+        "--autoLoadProjects"
+      ],
+      "fileExtensions": {
+        ".cs": "csharp",
+        ".razor": "aspnetcorerazor",
+        ".cshtml": "aspnetcorerazor"
+      }
+    },
+    "terraform": {
+      "command": "terraform-ls",
+      "args": [
+        "serve"
+      ],
+      "fileExtensions": {
+        ".tf": "terraform",
+        ".tfvars": "terraform-vars"
+      }
+    },
+    "typescript": {
+      "command": "typescript-language-server",
+      "args": [
+        "--stdio"
+      ],
+      "fileExtensions": {
+        ".ts": "typescript",
+        ".tsx": "typescriptreact",
+        ".mts": "typescript",
+        ".cts": "typescript",
+        ".js": "javascript",
+        ".jsx": "javascriptreact",
+        ".mjs": "javascript",
+        ".cjs": "javascript"
+      }
+    },
+    "python": {
+      "command": "pyright-langserver",
+      "args": [
+        "--stdio"
+      ],
+      "fileExtensions": {
+        ".py": "python",
+        ".pyi": "python"
+      }
+    },
+    "yaml": {
+      "command": "yaml-language-server",
+      "args": [
+        "--stdio"
+      ],
+      "fileExtensions": {
+        ".yaml": "yaml",
+        ".yml": "yaml"
+      }
+    },
+    "dart": {
+      "command": "dart",
+      "args": [
+        "language-server",
+        "--protocol=lsp"
+      ],
+      "fileExtensions": {
+        ".dart": "dart"
+      }
+    }
+  }
+}

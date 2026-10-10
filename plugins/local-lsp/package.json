@@ -1,0 +1,14 @@
+{
+  "name": "local-lsp-plugin",
+  "version": "1.1.1",
+  "private": true,
+  "description": "Local LSP plugin for Claude Code, Codex and GitHub Copilot CLI",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "bin": { "local-lsp-mcp": "./scripts/mcp.mjs" },
+  "scripts": {
+    "sync": "node scripts/sync-config.mjs",
+    "test": "node scripts/sync-config.mjs --check && node --test"
+  },
+  "files": [".claude-plugin", ".codex-plugin", ".github/plugin", "lsp-config", "scripts", "skills", "README.md"]
+}
