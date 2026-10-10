@@ -25,7 +25,8 @@ export function reminder(extensions) {
     + 'For code symbols (definition, references, implementations, callers, type), use the LSP tool, not Grep: '
     + 'load it with `ToolSearch select:LSP`, locate the symbol with `workspaceSymbol` (query = name, filePath = any '
     + 'covered file, line 1, character 1), then call findReferences / goToDefinition / goToImplementation / '
-    + 'incomingCalls at the returned position. Trust LSP results; do not re-verify them with Grep.\n'
+    + 'incomingCalls at the returned position. Trust LSP results; do not re-verify them with Grep. '
+    + 'The first call after startup may return nothing while the server indexes: retry it before falling back.\n'
     + 'Use Grep only for literal text: strings, log messages, comments, configuration keys, uncovered files.';
 }
 

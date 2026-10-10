@@ -72,14 +72,33 @@ export function guard(event, extensions, stateDir = join(tmpdir(), 'local-lsp-gu
         + 'Use the LSP tool (load it with `ToolSearch select:LSP`): workspaceSymbol with query '
         + `'${symbol}' (filePath = any covered file, line 1, character 1), then findReferences / goToDefinition / `
         + 'goToImplementation / incomingCalls at the returned position. Trust its results. '
+        + 'An empty result right after startup means the server is still indexing: retry the same LSP call. '
         + 'If you really need a literal text match (string, comment, log message), repeat the identical Grep call: it will be allowed.',
+    },
+  };
+}
+
+/**
+ * PostToolUse hint for LSP. A cold server answers the first request before indexing
+ * completes; the identical call succeeds once it has, so agents must not fall back to Grep.
+ */
+export function coldIndexHint(event) {
+  if (!/No symbols found|not finished indexing/i.test(JSON.stringify(event.tool_response ?? ''))) return null;
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PostToolUse',
+      additionalContext: 'local-lsp: this empty result usually means the language server is still indexing after a cold '
+        + 'start. Retry the identical LSP call before falling back to Grep; large C# solutions can need several retries.',
     },
   };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try {
-    const decision = guard(JSON.parse(readFileSync(0, 'utf8')), installedExtensions(loadSource()));
+    const event = JSON.parse(readFileSync(0, 'utf8'));
+    const decision = event.hook_event_name === 'PostToolUse'
+      ? coldIndexHint(event)
+      : guard(event, installedExtensions(loadSource()));
     if (decision) process.stdout.write(JSON.stringify(decision));
-  } catch { /* A guard failure must never block Grep. */ }
+  } catch { /* A hook failure must never block a tool call. */ }
 }

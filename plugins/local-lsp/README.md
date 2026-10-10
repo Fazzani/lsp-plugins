@@ -120,6 +120,9 @@ consider only servers found on PATH and do nothing when none is installed.
   `docs/`, YAML and Razor pass. Each identical call is denied **once per session**:
   repeating it unchanged runs the literal search. State lives in
   `<tmp>/local-lsp-guard/<session_id>.json`. Any guard error allows the call.
+- **PostToolUse on LSP** detects the empty "not finished indexing" answer a cold
+  server gives to its first request and tells the agent to retry the identical
+  call instead of falling back to Grep.
 
 ## Configuration and verification
 

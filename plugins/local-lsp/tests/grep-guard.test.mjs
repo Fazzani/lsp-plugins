@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { guard, symbolSearch } from '../scripts/grep-guard.mjs';
+import { coldIndexHint, guard, symbolSearch } from '../scripts/grep-guard.mjs';
 
 const extensions = ['.cs', '.razor', '.ts', '.tsx', '.yaml'];
 
@@ -56,4 +56,12 @@ test('Grep guard denies a symbol lookup once per session, then allows the identi
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
+});
+
+test('LSP cold-start results get a retry hint, real results do not', () => {
+  const cold = 'No symbols found in workspace. This may occur if the workspace is empty, or if the LSP server has not finished indexing the project.';
+  const hint = coldIndexHint({ hook_event_name: 'PostToolUse', tool_name: 'LSP', tool_response: cold });
+  assert.match(hint.hookSpecificOutput.additionalContext, /Retry the identical LSP call/);
+  assert.equal(hint.hookSpecificOutput.hookEventName, 'PostToolUse');
+  assert.equal(coldIndexHint({ tool_response: { result: 'Found 1 symbol in workspace' } }), null);
 });

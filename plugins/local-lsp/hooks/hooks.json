@@ -15,6 +15,14 @@
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/grep-guard.mjs\"" }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "LSP",
+        "hooks": [
+          { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/grep-guard.mjs\"" }
+        ]
+      }
     ]
   }
 }
