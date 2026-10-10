@@ -103,6 +103,14 @@ The audit does not install packages or change repository/client configuration.
 
 After updating this plugin, reload it or start a new session to discover the skill.
 
+## SessionStart reminder (Claude Code)
+
+Claude Code defers the `LSP` tool, so agents tend to fall back to the already
+loaded `Grep`. The plugin's `SessionStart` hook ([hooks/hooks.json](hooks/hooks.json))
+injects a short reminder listing the extensions whose server is on PATH and how to
+load the tool (`ToolSearch select:LSP`). It blocks nothing and stays silent when no
+configured server is installed. Codex and Copilot CLI do not use this hook.
+
 ## Configuration and verification
 
 `lsp-config/claude.json` is the source of truth. After changing its mappings, run:

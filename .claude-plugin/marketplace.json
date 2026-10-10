@@ -5,7 +5,7 @@
     {
       "name": "local-lsp",
       "description": "Local C#, Terraform, TypeScript/JavaScript, Python, YAML and Dart language servers",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "source": "./plugins/local-lsp"
     }
   ]
