@@ -10,7 +10,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Grep",
+        "matcher": "Grep|Bash|PowerShell",
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/grep-guard.mjs\"" }
         ]

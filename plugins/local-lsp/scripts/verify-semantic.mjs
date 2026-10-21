@@ -57,6 +57,7 @@ try {
       ['python', 'sample.py', 'answer = 42\nprint(answer)\n', 2, 7],
       ['terraform', 'sample.tf', 'variable "answer" { default = 42 }\noutput "result" { value = var.answer }\n', 2, 30],
       ['yaml', 'sample.yaml', 'defaults: &defaults\n  answer: 42\ncopy: *defaults\n', 3, 8],
+      ['php', 'sample.php', '<?php\n$answer = 42;\necho $answer;\n', 3, 7],
       ['dart', 'sample.dart', 'const answer = 42;\nvoid main() { print(answer); }\n', 2, 21],
       ['csharp', 'Sample.cs', 'public class Sample {\n  public static int Answer = 42;\n  public int Read() => Answer;\n}\n', 3, 24],
     ];

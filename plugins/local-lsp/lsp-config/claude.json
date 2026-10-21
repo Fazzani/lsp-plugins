@@ -52,5 +52,13 @@
     "extensionToLanguage": {
       ".dart": "dart"
     }
+  },
+  "php": {
+    "command": "phpantom_lsp",
+    "args": [],
+    "extensionToLanguage": {
+      ".php": "php",
+      ".phtml": "php"
+    }
   }
 }

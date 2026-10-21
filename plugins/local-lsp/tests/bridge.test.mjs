@@ -25,7 +25,7 @@ test('all native extension mappings preserve their language IDs in the MCP bridg
       assert.equal(extensions.get(extension.slice(1)), language);
     }
   }
-  assert.deepEqual(Object.keys(source).sort(), ['csharp', 'dart', 'python', 'terraform', 'typescript', 'yaml']);
+  assert.deepEqual(Object.keys(source).sort(), ['csharp', 'dart', 'php', 'python', 'terraform', 'typescript', 'yaml']);
 });
 
 test('Windows PATH lookup resolves cmd and bat shims, including paths containing spaces', () => {

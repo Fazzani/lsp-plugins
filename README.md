@@ -2,7 +2,7 @@
 
 Marketplace de plugins LSP locaux pour **Claude Code**, **Codex** et **GitHub Copilot CLI**.
 
-Le plugin [local-lsp](plugins/local-lsp/README.md) fournit la navigation sémantique et les diagnostics pour C#, Terraform, TypeScript/JavaScript, Python, YAML et Dart/Flutter. Claude Code et Copilot CLI utilisent leur intégration LSP native ; Codex utilise le pont MCP local `lspi`.
+Le plugin [local-lsp](plugins/local-lsp/README.md) fournit la navigation sémantique et les diagnostics pour C#, Terraform, TypeScript/JavaScript, Python, YAML, Dart/Flutter et PHP. Claude Code et Copilot CLI utilisent leur intégration LSP native ; Codex utilise le pont MCP local `lspi`.
 
 ## Prérequis
 

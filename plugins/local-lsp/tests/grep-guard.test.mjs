@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { coldIndexHint, guard, symbolSearch } from '../scripts/grep-guard.mjs';
+import { coldIndexHint, guard, recordLspQuery, shellSymbolSearch, symbolSearch } from '../scripts/grep-guard.mjs';
 
 const extensions = ['.cs', '.razor', '.ts', '.tsx', '.yaml'];
 
@@ -43,16 +43,47 @@ test('Grep guard allows literal text, regexes and uncovered files', () => {
   assert.equal(symbolSearch({ pattern: 'SyncFromArchiveAsync' }, []), null);
 });
 
-test('Grep guard denies a symbol lookup once per session, then allows the identical retry', () => {
+test('Shell guard flags grep, rg and git grep symbol lookups', () => {
+  const flagged = [
+    ['grep -n "SyncFromArchiveAsync" src/Service.cs', 'SyncFromArchiveAsync'],
+    ["rg -n 'OrderService|logging' src", 'OrderService'],
+    ['cd repo && git grep -n SyncFromArchiveAsync', 'SyncFromArchiveAsync'],
+    ['grep -A 3 -rn SyncFromArchiveAsync --include=*.cs .', 'SyncFromArchiveAsync'],
+    ['rg -t cs -e OrderService', 'OrderService'],
+    ['/usr/bin/grep -n SyncFromArchiveAsync src/Service.cs', 'SyncFromArchiveAsync'],
+  ];
+  for (const [command, symbol] of flagged) assert.equal(shellSymbolSearch(command, extensions), symbol, command);
+  const allowed = [
+    'grep -rn TODO .',
+    'grep -in SyncFromArchiveAsync src',
+    'grep -rn SyncFromArchiveAsync docs/',
+    'rg SyncFromArchiveAsync -g "*.md"',
+    'echo "grep SyncFromArchiveAsync"',
+    'az containerapp show -n app | grep clientId',
+    'grep -n "Commit\w*Sha|SourceCommit" src',
+    'sed -n 1,5p src/Service.cs',
+    '',
+  ];
+  for (const command of allowed) assert.equal(shellSymbolSearch(command, extensions), null, command);
+});
+
+test('Guard keeps denying a symbol lookup until the LSP has queried it', () => {
   const stateDir = mkdtempSync(join(tmpdir(), 'local lsp guard '));
   try {
-    const event = { session_id: 'abc-123', tool_input: { pattern: 'SyncFromArchiveAsync' } };
+    const event = { session_id: 'abc-123', tool_name: 'Grep', tool_input: { pattern: 'SyncFromArchiveAsync' } };
     const denial = guard(event, extensions, stateDir);
     assert.equal(denial.hookSpecificOutput.permissionDecision, 'deny');
     assert.match(denial.hookSpecificOutput.permissionDecisionReason, /workspaceSymbol with query 'SyncFromArchiveAsync'/);
-    assert.equal(guard(event, extensions, stateDir), null);
-    assert.notEqual(guard({ ...event, session_id: 'other' }, extensions, stateDir), null);
-    assert.equal(guard({ session_id: 'abc-123', tool_input: { pattern: 'TODO' } }, extensions, stateDir), null);
+    assert.notEqual(guard(event, extensions, stateDir), null, 'repeating the identical call is still denied');
+    const shell = { session_id: 'abc-123', tool_name: 'Bash', tool_input: { command: 'grep -rn SyncFromArchiveAsync src' } };
+    assert.notEqual(guard(shell, extensions, stateDir), null, 'shell grep is denied too');
+    assert.equal(guard({ ...shell, tool_input: { command: 'grep -rn TODO src' } }, extensions, stateDir), null);
+    recordLspQuery({ session_id: 'abc-123', tool_input: { operation: 'workspaceSymbol', query: 'syncFromArchiveAsync' } }, stateDir);
+    assert.equal(guard(event, extensions, stateDir), null, 'a text search is allowed after the LSP lookup');
+    assert.equal(guard(shell, extensions, stateDir), null);
+    assert.notEqual(guard({ ...event, session_id: 'other' }, extensions, stateDir), null, 'state is per session');
+    recordLspQuery({ session_id: 'abc-123', tool_input: { operation: 'findReferences', line: 1 } }, stateDir);
+    assert.notEqual(guard({ ...event, tool_input: { pattern: 'OrderService' } }, extensions, stateDir), null);
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }

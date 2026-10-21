@@ -18,12 +18,18 @@ environment changes require restarting desktop clients.
 | Python | `pyright-langserver --stdio` | `pyright@1.1.414` |
 | YAML | `yaml-language-server --stdio` | `1.25.0` |
 | Dart / Flutter | `dart language-server --protocol=lsp` | Dart SDK `3.13.4` |
+| PHP | `phpantom_lsp` (stdio) | [PHPantom](https://github.com/PHPantom-dev/phpantom_lsp) `0.11.1`, not yet run here |
 
 The Dart server is bundled with the SDK. For the two previously missing servers:
 
 ```powershell
 npm install --global --ignore-scripts pyright@1.1.414 yaml-language-server@1.25.0
 ```
+
+For PHP, download `phpantom_lsp-x86_64-pc-windows-msvc.zip` from the
+[PHPantom 0.11.1 release](https://github.com/PHPantom-dev/phpantom_lsp/releases/tag/0.11.1),
+verify it, extract `phpantom_lsp.exe` to a directory on PATH. Homebrew users can run
+`brew install phpantom-lsp`. Blade templates (`.blade.php`) are not mapped.
 
 Razor (`.razor`, `.cshtml`) mappings are retained but semantic support is
 **unverified**; a C# definition check does not validate Razor. YAML navigation
@@ -106,23 +112,29 @@ After updating this plugin, reload it or start a new session to discover the ski
 ## LSP-first hooks (Claude Code)
 
 Claude Code defers the `LSP` tool and its system prompt steers agents to `Grep`, so
-an instruction alone rarely changes the first tool chosen. The plugin ships two hooks
+an instruction alone rarely changes the first tool chosen. The plugin ships three hooks
 ([hooks/hooks.json](hooks/hooks.json)); Codex and Copilot CLI do not use them. Both
 consider only servers found on PATH and do nothing when none is installed.
 
 - **SessionStart** injects a short reminder: load the tool with
   `ToolSearch select:LSP`, locate the symbol with `workspaceSymbol`, then use
   position-based operations (`findReferences`, `goToDefinition`, …) and trust them.
-- **PreToolUse on Grep** denies a code-symbol lookup in covered files (camelCase,
-  PascalCase compounds, snake_case, dotted names, `class X`, `X\(`, `: IX`, or an
-  alternation of those) and names the LSP calls to make instead. Literal text,
-  real regexes, `-i` searches, `SCREAMING_SNAKE`, `TODO`, non-code globs or paths,
-  `docs/`, YAML and Razor pass. Each identical call is denied **once per session**:
-  repeating it unchanged runs the literal search. State lives in
+- **PreToolUse on Grep, Bash and PowerShell** denies a code-symbol lookup in covered
+  files (camelCase, PascalCase compounds, snake_case, dotted names, `class X`, `X\(`,
+  `: IX`, or an alternation of those) and names the LSP calls to make instead. In
+  shell commands it checks each `grep`, `egrep`, `fgrep`, `rg` and `git grep`
+  invocation, including inside `&&`, `;` and pipelines. A grep reading piped output
+  without a path is ignored. Literal text, real regexes, `-i` searches,
+  `SCREAMING_SNAKE`, `TODO`, non-code globs or paths, `docs/`, YAML and Razor pass.
+  Repeating a denied search does not unlock it. The lookup is allowed once the
+  session has called `workspaceSymbol` with a query containing that name, so a text
+  search for strings or comments stays possible after the LSP lookup. State lives in
   `<tmp>/local-lsp-guard/<session_id>.json`. Any guard error allows the call.
-- **PostToolUse on LSP** detects the empty "not finished indexing" answer a cold
-  server gives to its first request and tells the agent to retry the identical
-  call instead of falling back to Grep.
+  `Select-String` is not checked: it is case-insensitive by default, like `-i`.
+- **PostToolUse on LSP** records the `workspaceSymbol` query for the guard, then
+  detects the empty "not finished indexing" answer a cold server gives to its first
+  request and tells the agent to retry the identical call instead of falling back
+  to Grep.
 
 ## Configuration and verification
 
@@ -141,8 +153,8 @@ which expects a different JSON shape. Separate manifests keep native clients fro
 loading a duplicate MCP adapter.
 
 The semantic check creates a temporary workspace, tests actual definitions for
-C#, Terraform, TypeScript, JavaScript, Python, YAML anchors and Dart, and references
-for all except YAML. It requires all six installed servers and a .NET 10 SDK for
+C#, Terraform, TypeScript, JavaScript, Python, YAML anchors, Dart and PHP, and
+references for all except YAML. It requires all seven installed servers and a .NET 10 SDK for
 its C# fixture. It also checks that MCP offers no rename tools. Configuration
 validation alone does not prove a semantic connection in a running client.
 

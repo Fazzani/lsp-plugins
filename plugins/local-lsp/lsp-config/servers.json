@@ -67,6 +67,14 @@
       "fileExtensions": {
         ".dart": "dart"
       }
+    },
+    "php": {
+      "command": "phpantom_lsp",
+      "args": [],
+      "fileExtensions": {
+        ".php": "php",
+        ".phtml": "php"
+      }
     }
   }
 }

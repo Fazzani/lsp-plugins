@@ -36,6 +36,7 @@ copying a separate server catalog into this skill. Typical repository signals:
 | Terraform | `.tf`, `.tfvars`; inspect required Terraform/provider versions |
 | YAML | `.yaml`, `.yml`; identify the schema or CI platform when relevant |
 | Dart / Flutter | `pubspec.yaml`, `.dart`; inspect SDK constraints |
+| PHP | `composer.json`, `.php`, `.phtml`; inspect the PHP version and Composer autoload |
 
 Report other source languages as well. An existing trusted integration may support
 them; otherwise mark them `unsupported` by this plugin, not missing dependencies

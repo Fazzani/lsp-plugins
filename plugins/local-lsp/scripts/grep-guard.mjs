@@ -10,7 +10,7 @@ const UNGUARDED = new Set(['.yaml', '.yml', '.razor', '.cshtml']);
 // ripgrep type names accepted by Grep's `type` parameter.
 const RG_TYPES = {
   cs: '.cs', csharp: '.cs', ts: '.ts', typescript: '.ts', js: '.js', javascript: '.js',
-  py: '.py', python: '.py', tf: '.tf', terraform: '.tf', dart: '.dart',
+  py: '.py', python: '.py', php: '.php', tf: '.tf', terraform: '.tf', dart: '.dart',
 };
 const NON_CODE_DIRS = /(^|[\\/])(docs?|node_modules|bin|obj|dist|build|\.git)([\\/]|$)/i;
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -50,20 +50,100 @@ export function symbolSearch(input, extensions) {
   return symbols.find(Boolean) ?? null;
 }
 
+const FLAGS_WITH_VALUE = new Set(['-A', '-B', '-C', '-m', '-f', '-M', '-j', '--max-count', '--context',
+  '--after-context', '--before-context', '--file', '--max-columns', '--threads', '--color', '--colors', '--sort']);
+
+/** Splits a shell command into words and control operators, honouring quotes. */
+function tokenize(command) {
+  const tokens = [];
+  for (const [, doubled, single, operator, word] of command.matchAll(/"((?:\\.|[^"\\])*)"|'([^']*)'|(\|\||&&|[|;\n])|([^\s"'|;&]+)/g)) {
+    if (operator) tokens.push({ operator });
+    else tokens.push({ word: doubled?.replace(/\\(["\\])/g, '$1') ?? single ?? word });
+  }
+  return tokens;
+}
+
 /**
- * PreToolUse decision for Grep. Denies a symbol lookup once per session and call, so a
- * deliberate literal search succeeds when the agent repeats the identical call.
+ * Maps one grep / egrep / fgrep / rg / git grep invocation to Grep's input shape, or null.
+ * ponytail: a flag-aware word parser, not a shell; unknown syntax yields null (allowed).
+ */
+function grepInput(words) {
+  let index = 0;
+  const program = words[index]?.replace(/^.*[\\/]/, '').replace(/\.exe$/i, '');
+  if (program === 'git' && words[1] === 'grep') index = 2;
+  else if (['grep', 'egrep', 'fgrep', 'rg'].includes(program)) index = 1;
+  else return null;
+  const input = {};
+  const positional = [];
+  for (; index < words.length; index += 1) {
+    const word = words[index];
+    const [flag, inline] = word.startsWith('--') ? word.split(/=(.*)/s) : [word];
+    if (flag === '-e' || flag === '--regexp') input.pattern = inline ?? words[++index];
+    else if (flag === '-g' || flag === '--glob' || flag === '--include' || flag === '--iglob') input.glob = inline ?? words[++index];
+    else if (flag === '-t' || flag === '--type') input.type = inline ?? words[++index];
+    else if (flag === '--ignore-case' || /^-[a-zA-Z]*i[a-zA-Z]*$/.test(flag)) input['-i'] = true;
+    else if (FLAGS_WITH_VALUE.has(flag) && inline === undefined) index += 1;
+    else if (flag === '--') {
+      positional.push(...words.slice(index + 1));
+      break;
+    } else if (!word.startsWith('-')) positional.push(word);
+  }
+  if (input.pattern === undefined) input.pattern = positional.shift();
+  if (positional.length > 0) input.path = positional[0];
+  if (program !== 'rg') input.pattern = input.pattern?.replace(/\\\|/g, '|'); // BRE alternation
+  return input.pattern ? input : null;
+}
+
+/** Returns the first code-symbol lookup made by grep-like programs in a shell command, else null. */
+export function shellSymbolSearch(command, extensions) {
+  let words = [];
+  let piped = false;
+  for (const token of [...tokenize(command ?? ''), { operator: ';' }]) {
+    if (!token.operator) { words.push(token.word); continue; }
+    const input = grepInput(words);
+    // grep after a pipe without a path filters command output, not source files.
+    const symbol = input && !(piped && input.path === undefined) && symbolSearch(input, extensions);
+    if (symbol) return symbol;
+    words = [];
+    piped = token.operator === '|';
+  }
+  return null;
+}
+
+const stateFile = (stateDir, event) =>
+  join(stateDir, `${String(event.session_id ?? 'unknown').replace(/[^\w-]/g, '_')}.json`);
+
+function readState(file) {
+  try {
+    const state = JSON.parse(readFileSync(file, 'utf8'));
+    return Array.isArray(state?.lsp) ? state : { lsp: [] };
+  } catch {
+    return { lsp: [] }; // No LSP lookup yet in this session.
+  }
+}
+
+/** PostToolUse on LSP: remembers the names queried, which unlocks a later text search for them. */
+export function recordLspQuery(event, stateDir = join(tmpdir(), 'local-lsp-guard')) {
+  const query = String(event.tool_input?.query ?? '').trim().toLowerCase();
+  if (!query) return;
+  const file = stateFile(stateDir, event);
+  const state = readState(file);
+  if (state.lsp.includes(query)) return;
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(file, JSON.stringify({ lsp: [...state.lsp, query] }));
+}
+
+/**
+ * PreToolUse decision for Grep and shell commands. Denies a code-symbol lookup until the
+ * session has queried that symbol through the LSP; repeating the same search never passes.
  */
 export function guard(event, extensions, stateDir = join(tmpdir(), 'local-lsp-guard')) {
-  const symbol = symbolSearch(event.tool_input ?? {}, extensions);
+  const input = event.tool_input ?? {};
+  const shell = event.tool_name === 'Bash' || event.tool_name === 'PowerShell';
+  const symbol = shell ? shellSymbolSearch(input.command, extensions) : symbolSearch(input, extensions);
   if (!symbol) return null;
-  const file = join(stateDir, `${String(event.session_id ?? 'unknown').replace(/[^\w-]/g, '_')}.json`);
-  let seen = [];
-  try { seen = JSON.parse(readFileSync(file, 'utf8')); } catch { /* First denial in this session. */ }
-  const key = JSON.stringify(event.tool_input);
-  if (seen.includes(key)) return null;
-  mkdirSync(stateDir, { recursive: true });
-  writeFileSync(file, JSON.stringify([...seen, key]));
+  const { lsp } = readState(stateFile(stateDir, event));
+  if (lsp.some((query) => query.includes(symbol.toLowerCase()))) return null;
   return {
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
@@ -73,7 +153,8 @@ export function guard(event, extensions, stateDir = join(tmpdir(), 'local-lsp-gu
         + `'${symbol}' (filePath = any covered file, line 1, character 1), then findReferences / goToDefinition / `
         + 'goToImplementation / incomingCalls at the returned position. Trust its results. '
         + 'An empty result right after startup means the server is still indexing: retry the same LSP call. '
-        + 'If you really need a literal text match (string, comment, log message), repeat the identical Grep call: it will be allowed.',
+        + 'Repeating this search, or running it through grep/rg in a shell, is denied too. Once workspaceSymbol has '
+        + `been called for '${symbol}', a text search for it (strings, comments, log messages) is allowed.`,
     },
   };
 }
@@ -96,6 +177,7 @@ export function coldIndexHint(event) {
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   try {
     const event = JSON.parse(readFileSync(0, 'utf8'));
+    if (event.hook_event_name === 'PostToolUse') recordLspQuery(event);
     const decision = event.hook_event_name === 'PostToolUse'
       ? coldIndexHint(event)
       : guard(event, installedExtensions(loadSource()));
