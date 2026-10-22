@@ -145,13 +145,23 @@ Claude Code and Codex therefore start Dart through
 project and client type and shares it between sessions. The first session waits for
 the analysis; later sessions and forks connect to the warm server.
 
-- A detached daemon owns the server and listens on a named pipe (Windows) or a Unix
-  socket. Sessions authenticate with a token stored in the state directory. The daemon
-  answers `initialize` from cache, routes each session's requests and diagnostics to
-  that session, and keeps a document open while any session has it open. A session's
+- A detached daemon owns the server. On Windows it listens on a named pipe whose
+  access list it restricts to the current user, through a short PowerShell call at
+  startup; on Linux and macOS, on a Unix socket in a `0700` directory. A socket path
+  longer than `sun_path` (103 bytes) moves to `$TMPDIR/local-lsp-<uid>/` or
+  `/tmp/local-lsp-<uid>/` under a hashed name. Sessions authenticate with a token
+  stored in the state directory; a connection that sends no valid token within 5 s
+  is closed.
+- The daemon turns off `dynamicRegistration` in the capabilities it forwards, so the
+  server declares all its capabilities in the `initialize` result, which the daemon
+  caches for every session. It routes each session's requests and diagnostics to
+  that session, keeps a document open while any session has it open, and gives the
+  last diagnostics of a document to a session that opens it later. A session's
   `shutdown` disconnects only that session.
 - After 30 minutes without a session, the daemon stops the server and exits.
-  `LOCAL_LSP_SHARE_IDLE_MS` sets another delay.
+  `LOCAL_LSP_SHARE_IDLE_MS` sets another delay. A server that does not answer
+  `initialize` within 60 s (`LOCAL_LSP_SHARE_INIT_TIMEOUT_MS`) fails the waiting
+  sessions and stops the daemon, so the next session starts afresh.
 - Tokens and the daemon log, which includes the server's stderr, live in
   `%LOCALAPPDATA%\local-lsp\share` on Windows and `~/.cache/local-lsp/share`
   elsewhere. `LOCAL_LSP_SHARE_DIR` sets another directory.

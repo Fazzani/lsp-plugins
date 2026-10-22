@@ -1,6 +1,6 @@
 {
   "name": "local-lsp",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "description": "Local C#, Terraform, TypeScript/JavaScript, Python, YAML, Dart and PHP language servers",
   "author": { "name": "Heni FAZZANI" },
   "lspServers": "./lsp-config/servers.json",

@@ -12,6 +12,8 @@ const send = (message) => process.stdout.write(frame(message));
 const documents = new Map();
 const waiting = new Map();
 let initializeCount = 0;
+const cancelled = []; // Server-side ids of cancelled requests.
+let dynamicFeatures = []; // Like Dart, registered after initialized when the client allows it.
 let nextId = 0;
 
 const publish = (uri) => send({
@@ -26,13 +28,32 @@ process.stdin.on('data', (chunk) => {
       continue;
     }
     switch (method) {
-      case 'initialize':
+      case 'initialize': {
         initializeCount += 1;
-        setTimeout(() => send({ id, result: { capabilities: { textDocumentSync: 2 }, serverInfo: { name: 'fake', version: String(process.pid) } } }),
+        const capabilities = { textDocumentSync: 2 };
+        for (const [feature, provider] of [['hover', 'hoverProvider'], ['definition', 'definitionProvider']]) {
+          if (params.capabilities?.textDocument?.[feature]?.dynamicRegistration) dynamicFeatures.push(`textDocument/${feature}`);
+          else capabilities[provider] = true;
+        }
+        // FAKE_LSP_BAD_JSON sends a correctly framed body that is not JSON first.
+        if (process.env.FAKE_LSP_BAD_JSON) process.stdout.write('Content-Length: 5\r\n\r\n{oops');
+        setTimeout(() => send({ id, result: { capabilities, serverInfo: { name: 'fake', version: String(process.pid) } } }),
           Number(process.env.FAKE_LSP_INIT_DELAY) || 0);
         break;
+      }
+      case 'initialized':
+        if (dynamicFeatures.length) {
+          send({ id: ++nextId, method: 'client/registerCapability', params: { registrations: dynamicFeatures.map((feature) => ({ id: feature, method: feature })) } });
+        }
+        break;
       case 'test/echo':
-        send({ id, result: { pid: process.pid, initializeCount, params, open: [...documents.keys()], text: documents.get(params?.textDocument?.uri) } });
+        send({ id, result: { pid: process.pid, initializeCount, params, open: [...documents.keys()], text: documents.get(params?.textDocument?.uri), cancelled } });
+        break;
+      case 'test/slow':
+        setTimeout(() => send({ id, result: params }), params.ms);
+        break;
+      case '$/cancelRequest':
+        cancelled.push(params.id);
         break;
       case 'test/askConfig': {
         const requestId = ++nextId;

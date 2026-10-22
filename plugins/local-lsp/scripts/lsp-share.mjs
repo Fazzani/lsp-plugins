@@ -6,10 +6,10 @@
 // real server, multiplexes clients onto it and exits after an idle period.
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
-import { homedir, userInfo } from 'node:os';
-import { dirname, join } from 'node:path';
+import { homedir, tmpdir, userInfo } from 'node:os';
+import { dirname, join, posix } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { findExecutable } from './mcp.mjs';
 
@@ -17,6 +17,8 @@ const SELF = fileURLToPath(import.meta.url);
 const MUX_VERSION = 1;
 const START_TIMEOUT_MS = 15000;
 const STALE_LOCK_MS = 15000;
+const AUTH_TIMEOUT_MS = 5000;
+const SUN_PATH_MAX = 103; // macOS sun_path holds 104 bytes with the terminating NUL (Linux: 108).
 
 /** Returns the real server command of a config entry, unwrapping this shim when present. */
 export function nativeServer({ command, args = [] }) {
@@ -76,6 +78,18 @@ export function applyChanges(text, changes) {
 }
 
 /**
+ * Turns off every `dynamicRegistration` client capability. Servers then declare all their
+ * capabilities in the initialize result, which the daemon caches for every session, instead
+ * of registering them later with the first session only.
+ */
+export function staticCapabilities(capabilities) {
+  if (Array.isArray(capabilities)) return capabilities.map(staticCapabilities);
+  if (capabilities === null || typeof capabilities !== 'object') return capabilities;
+  return Object.fromEntries(Object.entries(capabilities).map(([name, value]) => [name,
+    name === 'dynamicRegistration' ? false : staticCapabilities(value)]));
+}
+
+/**
  * Identifies the shareable server instance: the same server for the same user, project
  * and client kind. Clients with other capabilities (Claude Code vs. lspi) get their own.
  */
@@ -94,9 +108,24 @@ export function stateDir(env = process.env) {
     : join(env.XDG_CACHE_HOME ?? join(homedir(), '.cache'), 'local-lsp', 'share');
 }
 
+/**
+ * POSIX socket path for a key: in the state directory when it fits in sun_path, otherwise a
+ * short hashed name in a per-user directory under $TMPDIR, then /tmp.
+ */
+export function socketPath(key, dir = stateDir(), temporaryDirs = [tmpdir(), '/tmp'], uid = process.getuid?.() ?? 0) {
+  const preferred = posix.join(dir, `${key}.sock`);
+  if (Buffer.byteLength(preferred) <= SUN_PATH_MAX) return preferred;
+  const name = `${createHash('sha256').update(preferred).digest('hex').slice(0, 24)}.sock`;
+  for (const temporary of temporaryDirs) {
+    const candidate = posix.join(temporary, `local-lsp-${uid}`, name);
+    if (Buffer.byteLength(candidate) <= SUN_PATH_MAX) return candidate;
+  }
+  throw new Error(`No socket path within ${SUN_PATH_MAX} bytes for ${preferred}`);
+}
+
 export const endpoint = (key) => (process.platform === 'win32'
   ? `\\\\.\\pipe\\local-lsp-${key}`
-  : join(stateDir(), `${key}.sock`));
+  : socketPath(key));
 
 /**
  * Flutter's `bin/dart.bat` only wraps the SDK's `dart.exe`. Running the binary keeps cmd.exe
@@ -106,6 +135,33 @@ export function serverExecutable(executable) {
   if (!/[\\/]bin[\\/]dart\.(bat|cmd)$/i.test(executable)) return executable;
   const binary = join(dirname(executable), 'cache', 'dart-sdk', 'bin', 'dart.exe');
   return existsSync(binary) ? binary : executable;
+}
+
+/**
+ * Creates `dir` if needed and, on POSIX, makes sure only the current user can enter it.
+ * Windows directories under %LOCALAPPDATA% are already private through their ACL.
+ */
+export function privateDir(dir) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (process.platform === 'win32') return dir;
+  const stats = lstatSync(dir);
+  if (!stats.isDirectory() || stats.uid !== process.getuid()) {
+    throw new Error(`${dir} is not a directory owned by the current user`);
+  }
+  if ((stats.mode & 0o077) !== 0) chmodSync(dir, 0o700);
+  return dir;
+}
+
+/** POSIX: removes a socket left by a dead daemon. Resolves false when a daemon still listens on it. */
+function clearStaleSocket(path) {
+  return new Promise((resolve) => {
+    const probe = connect(path);
+    probe.once('connect', () => { probe.destroy(); resolve(false); });
+    probe.once('error', (error) => {
+      if (error.code === 'ECONNREFUSED') rmSync(path, { force: true });
+      resolve(true);
+    });
+  });
 }
 
 const statePath = (key, extension) => join(stateDir(), `${key}.${extension}`);
@@ -118,6 +174,34 @@ function spawnServer(executable, args, options) {
     return spawn(quote(executable), args.map(quote), { ...options, shell: true });
   }
   return spawn(executable, args, options);
+}
+
+/**
+ * Windows: Node creates named pipes with the default DACL, which grants read access to
+ * Everyone and to anonymous logons. Node cannot set a security descriptor, so a short
+ * PowerShell client of the pipe replaces it with one that grants access to the current
+ * user only. Resolves with an error message, or '' on success.
+ */
+function restrictPipe(key) {
+  const script = [
+    "$rights = [System.IO.Pipes.PipeAccessRights]'ReadWrite, ReadPermissions, ChangePermissions'",
+    `$pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', 'local-lsp-${key}', $rights, [System.IO.Pipes.PipeOptions]::None, [System.Security.Principal.TokenImpersonationLevel]::None, [System.IO.HandleInheritability]::None)`,
+    '$pipe.Connect(5000)',
+    '$security = New-Object System.IO.Pipes.PipeSecurity',
+    '$security.SetAccessRuleProtection($true, $false)',
+    '$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User',
+    "$security.AddAccessRule((New-Object System.IO.Pipes.PipeAccessRule($user, 'FullControl', 'Allow')))",
+    '$pipe.SetAccessControl($security)',
+    '$pipe.Dispose()',
+  ].join('; ');
+  const powershell = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return new Promise((resolve) => {
+    const child = spawn(powershell, ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true });
+    let stderr = '';
+    child.stderr.on('data', (data) => { stderr += data; });
+    child.once('error', (error) => resolve(error.message));
+    child.once('close', (code) => resolve(code === 0 ? '' : stderr.trim() || `exit code ${code}`));
+  });
 }
 
 /** Starts the daemon unless another shim holds the start lock. */
@@ -189,7 +273,7 @@ async function shim(command, args) {
   const { rootUri } = initialize.params ?? {};
   const root = rootUri?.startsWith('file:') ? fileURLToPath(rootUri) : process.cwd();
   const key = shareKey(executable, args, initialize.params);
-  mkdirSync(stateDir(), { recursive: true, mode: 0o700 });
+  privateDir(stateDir());
   const deadline = Date.now() + START_TIMEOUT_MS;
   let socket;
   for (let delay = 50; !socket; delay = Math.min(delay * 2, 500)) {
@@ -211,9 +295,13 @@ async function shim(command, args) {
 
 async function daemon(key, root, executable, args) {
   const idleMs = Number(process.env.LOCAL_LSP_SHARE_IDLE_MS) || 30 * 60 * 1000;
+  const initTimeoutMs = Number(process.env.LOCAL_LSP_SHARE_INIT_TIMEOUT_MS) || 60 * 1000;
   const log = (line) => appendFileSync(statePath(key, 'log'), `${new Date().toISOString()} ${line}\n`);
   const listener = createServer();
-  if (process.platform !== 'win32') rmSync(endpoint(key), { force: true });
+  if (process.platform !== 'win32') {
+    privateDir(dirname(endpoint(key)));
+    if (!await clearStaleSocket(endpoint(key))) return; // A live daemon already serves this key.
+  }
   try {
     await new Promise((resolve, reject) => { listener.once('error', reject).listen(endpoint(key), resolve); });
   } catch (error) {
@@ -221,6 +309,11 @@ async function daemon(key, root, executable, args) {
     throw error;
   }
   writeFileSync(statePath(key, 'log'), '');
+  if (process.platform === 'win32') {
+    // Before the token exists, so no session can authenticate on a pipe with the default DACL.
+    const failure = await restrictPipe(key);
+    if (failure) log(`could not restrict the pipe to the current user, the token still guards it: ${failure}`);
+  }
   const token = Buffer.from(randomBytes(32).toString('hex'));
   writeFileSync(statePath(key, 'token'), token, { mode: 0o600 });
   rmSync(statePath(key, 'lock'), { force: true });
@@ -238,12 +331,13 @@ async function daemon(key, root, executable, args) {
   let nextId = 0;
   let initResult;
   let initWaiters;
+  let initTimer;
   let initializedSent = false;
   let idleTimer;
   let stopping = false;
 
   const cleanup = () => {
-    for (const extension of ['token', 'lock', ...(process.platform === 'win32' ? [] : ['sock'])]) {
+    for (const extension of ['token', 'lock']) {
       rmSync(statePath(key, extension), { force: true });
     }
   };
@@ -258,7 +352,7 @@ async function daemon(key, root, executable, args) {
     stopping = true;
     log(`stopping: ${reason}`);
     listener.close();
-    for (const socket of sockets) socket.destroy();
+    for (const socket of sockets) socket.end(); // end, not destroy: pending error replies still go out.
     cleanup();
     toServer({ id: 'local-lsp-shutdown', method: 'shutdown' });
     setTimeout(killServer, 5000).unref();
@@ -304,7 +398,16 @@ async function daemon(key, root, executable, args) {
           initWaiters.push({ client, id });
         } else {
           initWaiters = [{ client, id }];
-          toServer({ id: 'local-lsp-initialize', method, params: { ...params, processId: process.pid } });
+          // A server that never answers would hold every later session; give up so the next
+          // session starts a fresh daemon.
+          initTimer = setTimeout(() => {
+            const error = { code: -32603, message: `${executable} did not answer initialize within ${initTimeoutMs} ms` };
+            for (const waiter of initWaiters) waiter.client.send({ id: waiter.id, error });
+            stop('initialize timed out');
+          }, initTimeoutMs);
+          toServer({ id: 'local-lsp-initialize', method, params: {
+            ...params, processId: process.pid, capabilities: staticCapabilities(params?.capabilities),
+          } });
         }
       } else if (method === 'shutdown') {
         client.send({ id, result: null }); // The server is shared: only this client leaves.
@@ -382,6 +485,7 @@ async function daemon(key, root, executable, args) {
     const { id, method, params } = message;
     if (method === undefined) {
       if (id === 'local-lsp-initialize') {
+        clearTimeout(initTimer);
         const waiters = initWaiters;
         if ('error' in message) {
           for (const waiter of waiters) waiter.client.send({ id: waiter.id, error: message.error });
@@ -450,6 +554,8 @@ async function daemon(key, root, executable, args) {
     const client = { socket, docs: new Set(), pending: new Set(), send: (message) => socket.write(frame(message)) };
     const parse = createParser();
     let preamble = Buffer.alloc(0);
+    // A peer that cannot read the token must not hold a connection, nor keep the daemon alive.
+    const authTimer = setTimeout(() => { if (preamble) socket.destroy(); }, AUTH_TIMEOUT_MS);
     socket.on('data', (chunk) => {
       try {
         if (preamble) {
@@ -474,6 +580,7 @@ async function daemon(key, root, executable, args) {
     });
     socket.on('error', () => {});
     socket.once('close', () => {
+      clearTimeout(authTimer);
       sockets.delete(socket);
       if (!preamble) {
         leave(client);

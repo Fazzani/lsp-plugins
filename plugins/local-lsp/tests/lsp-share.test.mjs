@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { applyChanges, createParser, endpoint, frame, nativeServer, serverExecutable } from '../scripts/lsp-share.mjs';
+import { applyChanges, createParser, endpoint, frame, nativeServer, serverExecutable, shareKey, socketPath, staticCapabilities } from '../scripts/lsp-share.mjs';
 
 const SHIM = fileURLToPath(new URL('../scripts/lsp-share.mjs', import.meta.url));
 const FAKE = fileURLToPath(new URL('./fixtures/fake-lsp.mjs', import.meta.url));
@@ -27,12 +27,16 @@ function startClient(name, env, server = [process.execPath, FAKE]) {
   const parse = createParser();
   const pending = new Map();
   const notifications = [];
+  const serverRequests = [];
   let stderr = '';
   let nextId = 0;
   child.stderr.on('data', (data) => { stderr += data; });
   child.stdout.on('data', (chunk) => {
     for (const message of parse(chunk)) {
-      if (message.method && message.id !== undefined) child.stdin.write(frame({ id: message.id, result: [name] }));
+      if (message.method && message.id !== undefined) {
+        serverRequests.push(message);
+        child.stdin.write(frame({ id: message.id, result: [name] }));
+      }
       else if (message.method) notifications.push(message);
       else pending.get(message.id)?.(message);
     }
@@ -40,6 +44,7 @@ function startClient(name, env, server = [process.execPath, FAKE]) {
   const closed = new Promise((resolve) => { child.once('close', resolve); });
   return {
     notifications,
+    serverRequests,
     closed,
     request: (method, params, id = ++nextId) => new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`${name} ${method} timed out. ${stderr}`)), 20000);
@@ -153,8 +158,13 @@ function setup(extraEnv = {}) {
   /** Ends the sessions, waits for the idle daemon to stop its server, then deletes the workspace. */
   const finish = async (clients, serverPid) => {
     for (const client of clients) client.end();
-    if (serverPid) await until(() => !alive(serverPid), 'server stop', 15000);
-    rmSync(workspace, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+    try {
+      if (serverPid) await until(() => !alive(serverPid), 'server stop', 15000);
+    } finally {
+      try {
+        rmSync(workspace, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+      } catch { /* A server still running in the workspace keeps it; the OS temp cleanup removes it. */ }
+    }
   };
   return { workspace, env, initialize, uri, finish };
 }
@@ -263,5 +273,222 @@ test('stopping a server launched through a .cmd wrapper ends the whole tree', { 
     } finally {
       if (pid && alive(pid)) process.kill(pid);
     }
+  }
+});
+
+test('dynamic registration is turned off in forwarded capabilities', () => {
+  assert.deepEqual(staticCapabilities({ a: { dynamicRegistration: true, b: [{ dynamicRegistration: true }] }, c: 1 }),
+    { a: { dynamicRegistration: false, b: [{ dynamicRegistration: false }] }, c: 1 });
+});
+
+test('the initialize result declares every capability, with nothing registered later', async () => {
+  const { env, initialize, finish } = setup();
+  const dynamic = { ...initialize, capabilities: { textDocument: { hover: { dynamicRegistration: true }, definition: { dynamicRegistration: true } } } };
+  const a = startClient('a', env);
+  const b = startClient('b', env);
+  let pid;
+  try {
+    const [initA, initB] = await Promise.all([a.request('initialize', dynamic), b.request('initialize', dynamic)]);
+    pid = (await a.request('test/echo', {})).result.pid;
+    for (const { result } of [initA, initB]) {
+      assert.equal(result.capabilities.hoverProvider, true);
+      assert.equal(result.capabilities.definitionProvider, true);
+    }
+    a.notify('initialized', {});
+    b.notify('initialized', {});
+    await Promise.all([a.request('test/echo', {}), b.request('test/echo', {})]);
+    const registrations = [...a.serverRequests, ...b.serverRequests].filter((request) => request.method === 'client/registerCapability');
+    assert.deepEqual(registrations, [], 'no capability is registered after initialize');
+  } finally {
+    await finish([a, b], pid);
+  }
+});
+
+/** The single share key of a test's state directory, once its daemon serves. */
+const shareKeyOf = (env) => readdirSync(env.LOCAL_LSP_SHARE_DIR).find((file) => file.endsWith('.token')).slice(0, -6);
+
+test('the named pipe grants access to the current user only', { skip: process.platform !== 'win32' }, async () => {
+  const { env, initialize, finish } = setup();
+  const a = startClient('a', env);
+  let pid;
+  try {
+    await a.request('initialize', initialize);
+    pid = (await a.request('test/echo', {})).result.pid;
+    const script = [
+      "$rights = [System.IO.Pipes.PipeAccessRights]'ReadData, ReadPermissions'",
+      `$pipe = [System.IO.Pipes.NamedPipeClientStream]::new('.', 'local-lsp-${shareKeyOf(env)}', $rights, 'None', 'None', 'None')`,
+      '$pipe.Connect(5000)',
+      '$full = [System.IO.Pipes.PipeAccessRights]::FullControl',
+      '$rules = $pipe.GetAccessControl().GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { @{ sid = $_.IdentityReference.Value; type = [string]$_.AccessControlType; full = ($_.PipeAccessRights -band $full) -eq $full } }',
+      '$pipe.Dispose()',
+      '@{ user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; rules = @($rules) } | ConvertTo-Json -Compress -Depth 4',
+    ].join('; ');
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true });
+    assert.equal(result.status, 0, result.stderr);
+    const { user, rules } = JSON.parse(result.stdout);
+    assert.deepEqual(rules, [{ sid: user, type: 'Allow', full: true }], 'no access for Everyone, anonymous logons or other users');
+  } finally {
+    await finish([a], pid);
+  }
+});
+
+test('a connection that does not authenticate is closed', async () => {
+  const { env, initialize, finish } = setup();
+  const a = startClient('a', env);
+  let pid;
+  let silent;
+  try {
+    await a.request('initialize', initialize);
+    pid = (await a.request('test/echo', {})).result.pid;
+    const previousDir = process.env.LOCAL_LSP_SHARE_DIR;
+    process.env.LOCAL_LSP_SHARE_DIR = env.LOCAL_LSP_SHARE_DIR;
+    silent = connect(endpoint(shareKeyOf(env)));
+    if (previousDir === undefined) delete process.env.LOCAL_LSP_SHARE_DIR;
+    else process.env.LOCAL_LSP_SHARE_DIR = previousDir;
+    silent.on('error', () => {});
+    let closed = false;
+    silent.once('close', () => { closed = true; });
+    await until(() => closed, 'the unauthenticated connection to close', 9000);
+  } finally {
+    silent?.destroy();
+    await finish([a], pid);
+  }
+});
+
+/** The endpoint of a share key in a test's own state directory. */
+function endpointIn(env, key) {
+  const previousDir = process.env.LOCAL_LSP_SHARE_DIR;
+  process.env.LOCAL_LSP_SHARE_DIR = env.LOCAL_LSP_SHARE_DIR;
+  try {
+    return endpoint(key);
+  } finally {
+    if (previousDir === undefined) delete process.env.LOCAL_LSP_SHARE_DIR;
+    else process.env.LOCAL_LSP_SHARE_DIR = previousDir;
+  }
+}
+const modeOf = (path) => statSync(path).mode & 0o777;
+
+test('the state and socket directories are private, and a stale socket file is replaced', { skip: process.platform === 'win32' }, async () => {
+  const { env, initialize, finish } = setup();
+  mkdirSync(env.LOCAL_LSP_SHARE_DIR);
+  chmodSync(env.LOCAL_LSP_SHARE_DIR, 0o755);
+  const socket = endpointIn(env, shareKey(process.execPath, [FAKE], initialize));
+  // A daemon killed with SIGKILL leaves its socket file behind.
+  spawnSync(process.execPath, ['-e', `require('net').createServer().listen(${JSON.stringify(socket)}, () => process.kill(process.pid, 'SIGKILL'))`]);
+  assert(existsSync(socket), 'the stale socket file exists before the daemon starts');
+  const a = startClient('a', env);
+  let pid;
+  try {
+    await a.request('initialize', initialize);
+    pid = (await a.request('test/echo', {})).result.pid;
+    assert.equal(modeOf(env.LOCAL_LSP_SHARE_DIR), 0o700);
+    assert.equal(modeOf(dirname(socket)), 0o700);
+  } finally {
+    await finish([a], pid);
+  }
+});
+
+test('a second daemon leaves a live daemon and its socket alone', { skip: process.platform === 'win32' }, async () => {
+  const { workspace, env, initialize, finish } = setup();
+  const a = startClient('a', env);
+  let b;
+  let pid;
+  try {
+    await a.request('initialize', initialize);
+    pid = (await a.request('test/echo', {})).result.pid;
+    const key = shareKey(process.execPath, [FAKE], initialize);
+    const second = spawnSync(process.execPath, [SHIM, '--daemon', key, workspace, process.execPath, FAKE], { env, timeout: 10000 });
+    assert.equal(second.error, undefined, 'the second daemon exits instead of serving');
+    b = startClient('b', env);
+    await b.request('initialize', initialize);
+    assert.equal((await b.request('test/echo', {})).result.pid, pid, 'new sessions still reach the live daemon');
+  } finally {
+    await finish([a, ...(b ? [b] : [])], pid);
+  }
+});
+
+test('a socket path longer than sun_path falls back to a short hashed path', () => {
+  const key = 'a'.repeat(24);
+  assert.equal(socketPath(key, '/home/me/.cache/local-lsp/share', ['/tmp'], 501), `/home/me/.cache/local-lsp/share/${key}.sock`);
+  const longDir = `/Users/${'x'.repeat(120)}/.cache/local-lsp/share`;
+  const fallback = socketPath(key, longDir, ['/var/folders/ab/cdefgh/T'], 501);
+  assert.match(fallback, /^\/var\/folders\/ab\/cdefgh\/T\/local-lsp-501\/[0-9a-f]{24}\.sock$/);
+  assert(Buffer.byteLength(fallback) <= 103);
+  assert.equal(socketPath(key, longDir, ['/var/folders/ab/cdefgh/T'], 501), fallback, 'the fallback name is stable');
+  assert.notEqual(socketPath(key, `${longDir}2`, ['/tmp'], 501), socketPath(key, longDir, ['/tmp'], 501), 'state directories do not collide');
+  assert.match(socketPath(key, longDir, [`/${'t'.repeat(120)}`, '/tmp'], 501), /^\/tmp\/local-lsp-501\//, 'a long $TMPDIR falls back to /tmp');
+});
+
+test('sessions work when the home directory is very long', { skip: process.platform === 'win32' }, async () => {
+  const { workspace, initialize, finish } = setup();
+  const home = join(workspace, 'h'.repeat(100), 'i'.repeat(100));
+  mkdirSync(home, { recursive: true });
+  const env = { ...process.env, HOME: home, LOCAL_LSP_SHARE_IDLE_MS: '500' };
+  delete env.LOCAL_LSP_SHARE_DIR;
+  delete env.XDG_CACHE_HOME;
+  const a = startClient('a', env);
+  let pid;
+  try {
+    await a.request('initialize', initialize);
+    pid = (await a.request('test/echo', {})).result.pid;
+    const key = shareKey(process.execPath, [FAKE], initialize);
+    const socket = socketPath(key, join(home, '.cache', 'local-lsp', 'share'));
+    assert(!socket.startsWith(home), 'the socket is not under the long home');
+    assert(statSync(socket).isSocket());
+    assert.equal(modeOf(dirname(socket)), 0o700);
+  } finally {
+    await finish([a], pid);
+  }
+});
+
+test('a server body that is not JSON is dropped and the session goes on', async () => {
+  const { env, initialize, finish } = setup({ FAKE_LSP_BAD_JSON: '1' });
+  const a = startClient('a', env);
+  let pid;
+  try {
+    assert.equal((await a.request('initialize', initialize)).result.serverInfo.name, 'fake');
+    pid = (await a.request('test/echo', {})).result.pid;
+    const log = readFileSync(join(env.LOCAL_LSP_SHARE_DIR, `${shareKeyOf(env)}.log`), 'utf8');
+    assert.match(log, /server protocol error/);
+  } finally {
+    await finish([a], pid);
+  }
+});
+
+test('a session killed mid-request has its request cancelled and leaves the others working', async () => {
+  const { env, initialize, finish } = setup();
+  const a = startClient('a', env);
+  const b = startClient('b', env);
+  let pid;
+  try {
+    await Promise.all([a.request('initialize', initialize), b.request('initialize', initialize)]);
+    pid = (await b.request('test/echo', {})).result.pid;
+    a.request('test/slow', { ms: 3000 }).catch(() => {});
+    await new Promise((resolve) => { setTimeout(resolve, 300); });
+    a.kill();
+    await a.closed;
+    let cancelled = [];
+    for (const deadline = Date.now() + 5000; cancelled.length === 0 && Date.now() < deadline;) {
+      cancelled = (await b.request('test/echo', {})).result.cancelled;
+    }
+    assert.equal(cancelled.length, 1, 'the dead session\'s request is cancelled on the server');
+    assert.deepEqual((await b.request('test/slow', { ms: 50, from: 'b' })).result, { ms: 50, from: 'b' });
+  } finally {
+    await finish([a, b], pid);
+  }
+});
+
+test('a server that never answers initialize fails the session and stops the daemon', async () => {
+  const { env, initialize, finish } = setup({ FAKE_LSP_INIT_DELAY: '60000', LOCAL_LSP_SHARE_INIT_TIMEOUT_MS: '1000' });
+  const a = startClient('a', env);
+  try {
+    const started = Date.now();
+    const answer = await a.request('initialize', initialize);
+    assert.match(answer.error?.message ?? '', /did not answer initialize/);
+    assert(Date.now() - started < 10000);
+    await until(() => readdirSync(env.LOCAL_LSP_SHARE_DIR).every((file) => !file.endsWith('.token')), 'the daemon to stop');
+    await a.closed;
+  } finally {
+    await finish([a]);
   }
 });
