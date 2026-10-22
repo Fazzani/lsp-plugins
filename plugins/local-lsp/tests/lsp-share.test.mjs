@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { applyChanges, createParser, endpoint, frame, nativeServer } from '../scripts/lsp-share.mjs';
+import { applyChanges, createParser, endpoint, frame, nativeServer, serverExecutable } from '../scripts/lsp-share.mjs';
 
 const SHIM = fileURLToPath(new URL('../scripts/lsp-share.mjs', import.meta.url));
 const FAKE = fileURLToPath(new URL('./fixtures/fake-lsp.mjs', import.meta.url));
@@ -22,8 +22,8 @@ const alive = (pid) => {
 };
 
 /** Starts a shim the way Claude Code does and answers server requests with its own name. */
-function startClient(name, env) {
-  const child = spawn(process.execPath, [SHIM, process.execPath, FAKE], { env, windowsHide: true });
+function startClient(name, env, server = [process.execPath, FAKE]) {
+  const child = spawn(process.execPath, [SHIM, ...server], { env, windowsHide: true });
   const parse = createParser();
   const pending = new Map();
   const notifications = [];
@@ -48,6 +48,7 @@ function startClient(name, env) {
     }),
     notify: (method, params) => child.stdin.write(frame({ method, params })),
     end: () => child.stdin.end(),
+    kill: () => child.kill(),
   };
 }
 
@@ -140,5 +141,127 @@ test('sessions share one server, keep their own ids and documents, and the daemo
     if (previousDir === undefined) delete process.env.LOCAL_LSP_SHARE_DIR;
     else process.env.LOCAL_LSP_SHARE_DIR = previousDir;
     rmSync(workspace, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
+});
+
+/** A private workspace and state directory, so each test gets its own daemon. */
+function setup(extraEnv = {}) {
+  const workspace = mkdtempSync(join(tmpdir(), 'local lsp share '));
+  const env = { ...process.env, LOCAL_LSP_SHARE_DIR: join(workspace, 'state'), LOCAL_LSP_SHARE_IDLE_MS: '500', ...extraEnv };
+  const initialize = { processId: process.pid, rootUri: pathToFileURL(workspace).href, capabilities: {}, clientInfo: { name: 'test' } };
+  const uri = (file) => pathToFileURL(join(workspace, file)).href;
+  /** Ends the sessions, waits for the idle daemon to stop its server, then deletes the workspace. */
+  const finish = async (clients, serverPid) => {
+    for (const client of clients) client.end();
+    if (serverPid) await until(() => !alive(serverPid), 'server stop', 15000);
+    rmSync(workspace, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  };
+  return { workspace, env, initialize, uri, finish };
+}
+const open = (client, uri, text) => client.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'dart', version: 1, text } });
+
+test('a session that dies during initialize does not become the primary', async () => {
+  const { env, initialize, finish } = setup({ FAKE_LSP_INIT_DELAY: '800' });
+  const a = startClient('a', env);
+  const b = startClient('b', env);
+  let pid;
+  try {
+    a.request('initialize', initialize).catch(() => {});
+    await new Promise((resolve) => { setTimeout(resolve, 300); });
+    a.kill();
+    await a.closed;
+    await b.request('initialize', initialize);
+    b.notify('initialized', {});
+    const answer = await b.request('test/askConfig', {});
+    assert.deepEqual(answer.result, ['b'], 'the server request reaches the live session');
+    pid = (await b.request('test/echo', {})).result.pid;
+  } finally {
+    await finish([a, b], pid);
+  }
+});
+
+test('a later session gets the diagnostics of a document it opens unchanged', async () => {
+  const { env, initialize, uri, finish } = setup();
+  const a = startClient('a', env);
+  const b = startClient('b', env);
+  let pid;
+  try {
+    await a.request('initialize', initialize);
+    pid = (await a.request('test/echo', {})).result.pid;
+    open(a, uri('f.dart'), 'same');
+    await until(() => diagnostic(a, uri('f.dart')) === 'same', 'first diagnostics');
+    await b.request('initialize', initialize);
+    open(b, uri('f.dart'), 'same');
+    await until(() => diagnostic(b, uri('f.dart')) === 'same', 'replayed diagnostics');
+  } finally {
+    await finish([a, b], pid);
+  }
+});
+
+test('non-LSP output from the server does not break the sessions', async () => {
+  const { env, initialize, finish } = setup({ FAKE_LSP_NOISE: '1' });
+  const a = startClient('a', env);
+  let pid;
+  try {
+    assert.equal((await a.request('initialize', initialize)).result.serverInfo.name, 'fake');
+    pid = (await a.request('test/echo', {})).result.pid;
+  } finally {
+    await finish([a], pid);
+  }
+});
+
+test('position requests run against the text of the requesting session', async () => {
+  const { env, initialize, uri, finish } = setup();
+  const a = startClient('a', env);
+  const b = startClient('b', env);
+  let pid;
+  try {
+    await Promise.all([a.request('initialize', initialize), b.request('initialize', initialize)]);
+    open(a, uri('f.dart'), 'one');
+    open(b, uri('f.dart'), 'one');
+    b.notify('textDocument/didChange', { textDocument: { uri: uri('f.dart'), version: 2 }, contentChanges: [{ text: 'two' }] });
+    await until(() => diagnostic(b, uri('f.dart')) === 'two', 'the server holding the text of b');
+    const textDocument = { uri: uri('f.dart') };
+    const seenByA = await a.request('test/echo', { textDocument });
+    assert.equal(seenByA.result.text, 'one');
+    assert.equal((await b.request('test/echo', { textDocument })).result.text, 'two');
+    pid = seenByA.result.pid;
+  } finally {
+    await finish([a, b], pid);
+  }
+});
+
+test('Flutter dart.bat resolves to the SDK binary', () => {
+  const flutter = mkdtempSync(join(tmpdir(), 'local lsp flutter '));
+  try {
+    const wrapper = join(flutter, 'bin', 'dart.bat');
+    const binary = join(flutter, 'bin', 'cache', 'dart-sdk', 'bin', 'dart.exe');
+    mkdirSync(join(flutter, 'bin', 'cache', 'dart-sdk', 'bin'), { recursive: true });
+    writeFileSync(wrapper, '');
+    assert.equal(serverExecutable(wrapper), wrapper, 'kept while the SDK cache is missing');
+    writeFileSync(binary, '');
+    assert.equal(serverExecutable(wrapper), binary);
+    assert.equal(serverExecutable(join(flutter, 'bin', 'other.bat')), join(flutter, 'bin', 'other.bat'));
+  } finally {
+    rmSync(flutter, { recursive: true, force: true });
+  }
+});
+
+test('stopping a server launched through a .cmd wrapper ends the whole tree', { skip: process.platform !== 'win32' }, async () => {
+  const { workspace, env, initialize, finish } = setup({ FAKE_LSP_IGNORE_EXIT: '1' });
+  const wrapper = join(workspace, 'fake-server.cmd');
+  writeFileSync(wrapper, `@"${process.execPath}" "${FAKE}" %*\r\n`);
+  const a = startClient('a', env, [wrapper]);
+  let pid;
+  try {
+    await a.request('initialize', initialize);
+    pid = (await a.request('test/echo', {})).result.pid;
+    assert.notEqual(pid, undefined);
+  } finally {
+    try {
+      await finish([a], pid); // The server ignores exit, so only the daemon's kill fallback stops it.
+    } finally {
+      if (pid && alive(pid)) process.kill(pid);
+    }
   }
 });

@@ -4,12 +4,12 @@
 // It reads the client's initialize request, connects to the daemon serving the same
 // server and project (starting it if needed) and pipes stdio to it. The daemon runs the
 // real server, multiplexes clients onto it and exits after an idle period.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { connect, createServer } from 'node:net';
 import { homedir, userInfo } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { findExecutable } from './mcp.mjs';
 
@@ -35,11 +35,15 @@ export function createParser() {
       const end = buffer.indexOf('\r\n\r\n');
       if (end < 0) break;
       const length = /content-length:\s*(\d+)/i.exec(buffer.subarray(0, end).toString('ascii'));
-      if (!length) throw new Error('LSP header without Content-Length');
+      if (!length) { // Not an LSP header, such as a wrapper script's banner: skip it.
+        buffer = buffer.subarray(end + 4);
+        continue;
+      }
       const bodyEnd = end + 4 + Number(length[1]);
       if (buffer.length < bodyEnd) break;
-      messages.push(JSON.parse(buffer.subarray(end + 4, bodyEnd).toString('utf8')));
+      const body = buffer.subarray(end + 4, bodyEnd);
       buffer = buffer.subarray(bodyEnd);
+      messages.push(JSON.parse(body.toString('utf8')));
     }
     return messages;
   };
@@ -93,6 +97,16 @@ export function stateDir(env = process.env) {
 export const endpoint = (key) => (process.platform === 'win32'
   ? `\\\\.\\pipe\\local-lsp-${key}`
   : join(stateDir(), `${key}.sock`));
+
+/**
+ * Flutter's `bin/dart.bat` only wraps the SDK's `dart.exe`. Running the binary keeps cmd.exe
+ * out of the process tree, so stopping the server cannot leave an orphaned dart.exe.
+ */
+export function serverExecutable(executable) {
+  if (!/[\\/]bin[\\/]dart\.(bat|cmd)$/i.test(executable)) return executable;
+  const binary = join(dirname(executable), 'cache', 'dart-sdk', 'bin', 'dart.exe');
+  return existsSync(binary) ? binary : executable;
+}
 
 const statePath = (key, extension) => join(stateDir(), `${key}.${extension}`);
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
@@ -150,7 +164,7 @@ function attach(key) {
 }
 
 async function shim(command, args) {
-  const executable = findExecutable(command);
+  const executable = serverExecutable(findExecutable(command));
   if (process.env.LOCAL_LSP_SHARE === 'off') {
     const child = spawnServer(executable, args, { stdio: 'inherit', windowsHide: true });
     child.once('error', (error) => { console.error(`local-lsp: ${error.message}`); process.exit(1); });
@@ -220,6 +234,7 @@ async function daemon(key, root, executable, args) {
   const relays = new Map(); // Relay id sent to a client -> { id, method } of the server request
   const tokens = new Map(); // Daemon progress token -> { client, token }
   const documents = new Map(); // uri -> { version, text, owners: Map<client, text> }
+  const diagnostics = new Map(); // uri -> last non-empty publishDiagnostics, replayed to later openers
   let nextId = 0;
   let initResult;
   let initWaiters;
@@ -232,6 +247,12 @@ async function daemon(key, root, executable, args) {
       rmSync(statePath(key, extension), { force: true });
     }
   };
+  const killServer = () => {
+    if (process.platform !== 'win32') return server.kill();
+    // Kill the whole tree: a .bat server runs under cmd.exe, which server.kill() alone would orphan.
+    spawnSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe'),
+      ['/PID', String(server.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+  };
   const stop = (reason) => {
     if (stopping) return;
     stopping = true;
@@ -240,7 +261,7 @@ async function daemon(key, root, executable, args) {
     for (const socket of sockets) socket.destroy();
     cleanup();
     toServer({ id: 'local-lsp-shutdown', method: 'shutdown' });
-    setTimeout(() => server.kill(), 5000).unref();
+    setTimeout(killServer, 5000).unref();
   };
   const scheduleIdle = () => {
     clearTimeout(idleTimer);
@@ -288,6 +309,10 @@ async function daemon(key, root, executable, args) {
       } else if (method === 'shutdown') {
         client.send({ id, result: null }); // The server is shared: only this client leaves.
       } else {
+        // Positions refer to this client's text, which another session may have replaced.
+        const uri = params?.textDocument?.uri;
+        const document = uri && documents.get(uri);
+        if (document?.owners.has(client)) syncDocument(uri, document, document.owners.get(client));
         const serverId = ++nextId;
         const owned = [];
         const rewritten = { ...params };
@@ -328,6 +353,8 @@ async function daemon(key, root, executable, args) {
           documents.set(uri, { version: 1, text, owners: new Map([[client, text]]) });
           toServer({ method, params: { textDocument: { uri, languageId, version: 1, text } } });
         }
+        // The server does not republish unchanged diagnostics, so a later opener gets the last ones.
+        if (diagnostics.has(uri)) client.send(diagnostics.get(uri));
         return;
       }
       case 'textDocument/didChange': {
@@ -389,6 +416,8 @@ async function daemon(key, root, executable, args) {
       return;
     }
     if (method === 'textDocument/publishDiagnostics') {
+      if (params.diagnostics?.length) diagnostics.set(params.uri, message);
+      else diagnostics.delete(params.uri);
       for (const client of clients) if (client.docs.has(params.uri)) client.send(message);
     } else if (method === '$/progress' && tokens.has(params?.token)) {
       const owner = tokens.get(params.token);
@@ -400,6 +429,8 @@ async function daemon(key, root, executable, args) {
 
   const leave = (client) => {
     clients.delete(client);
+    // A client that dies before the initialize result must not become the primary.
+    if (initWaiters) initWaiters = initWaiters.filter((waiter) => waiter.client !== client);
     for (const uri of [...client.docs]) closeDocument(client, uri);
     for (const serverId of client.pending) {
       for (const daemonToken of requests.get(serverId).tokens) tokens.delete(daemonToken);
@@ -454,7 +485,17 @@ async function daemon(key, root, executable, args) {
 
   const parseServer = createParser();
   server.stdout.on('data', (chunk) => {
-    for (const message of parseServer(chunk)) fromServer(message);
+    try {
+      for (const message of parseServer(chunk)) fromServer(message);
+    } catch (error) {
+      log(`server protocol error: ${error.message}`); // Drops one message, keeps the sessions.
+    }
+  });
+  process.on('uncaughtException', (error) => {
+    log(`daemon error: ${error.stack}`);
+    killServer();
+    cleanup();
+    process.exit(1);
   });
   server.stderr.on('data', (chunk) => appendFileSync(statePath(key, 'log'), chunk));
   server.stdin.on('error', (error) => log(`server stdin: ${error.message}`));

@@ -160,7 +160,9 @@ the analysis; later sessions and forks connect to the warm server.
 - Dart requests wait up to 180 s (`requestTimeout`) instead of Claude Code's 60 s
   default, which covers the first analysis. Claude Code rejects unknown keys in
   `lspServers`, so this plugin needs Claude Code `2.1.288` or later.
-- The server is the `dart` found first on PATH. Put the project's SDK first
+- The server is the `dart` found first on PATH. Flutter's `bin\dart.bat` is replaced
+  by the `dart.exe` of its SDK cache, so no `cmd.exe` sits between the daemon and the
+  server. Put the project's SDK first
   (`<flutter>/bin` or `<flutter>/bin/cache/dart-sdk/bin`): with another SDK, the
   analysis may differ from the editor's and cannot reuse its cache. Restart the
   client after changing PATH.
