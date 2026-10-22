@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { nativeServer } from './lsp-share.mjs';
 import { findExecutable } from './mcp.mjs';
 
 export const loadSource = () =>
@@ -9,7 +10,10 @@ export const loadSource = () =>
 /** Extensions (with leading dot) whose configured language server resolves on PATH. */
 export function installedExtensions(source, path = process.env.PATH ?? '', platform = process.platform) {
   return Object.values(source)
-    .filter((server) => findExecutable(server.command, path, platform) !== server.command)
+    .filter((server) => {
+      const { command } = nativeServer(server);
+      return findExecutable(command, path, platform) !== command;
+    })
     .flatMap((server) => Object.keys(server.extensionToLanguage));
 }
 

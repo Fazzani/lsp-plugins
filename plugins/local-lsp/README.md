@@ -17,7 +17,7 @@ environment changes require restarting desktop clients.
 | TypeScript / JavaScript / JSX / TSX | `typescript-language-server --stdio` | `6.0.2`, with TypeScript `5.9.3` |
 | Python | `pyright-langserver --stdio` | `pyright@1.1.414` |
 | YAML | `yaml-language-server --stdio` | `1.25.0` |
-| Dart / Flutter | `dart language-server --protocol=lsp` | Dart SDK `3.13.4` |
+| Dart / Flutter | `dart language-server --protocol=lsp`, shared between sessions ([below](#shared-dart-server)) | Dart SDK `3.13.4` |
 | PHP | `phpantom_lsp` (stdio) | [PHPantom](https://github.com/PHPantom-dev/phpantom_lsp) `0.11.1`, not yet run here |
 
 The Dart server is bundled with the SDK. For the two previously missing servers:
@@ -136,6 +136,39 @@ consider only servers found on PATH and do nothing when none is installed.
   request and tells the agent to retry the identical call instead of falling back
   to Grep.
 
+## Shared Dart server
+
+`dart language-server` analyzes the whole project before it answers, so on a large
+Flutter project a fresh server can take more than a minute on its first request.
+Claude Code and Codex therefore start Dart through
+[scripts/lsp-share.mjs](scripts/lsp-share.mjs), which keeps one server per user,
+project and client type and shares it between sessions. The first session waits for
+the analysis; later sessions and forks connect to the warm server.
+
+- A detached daemon owns the server and listens on a named pipe (Windows) or a Unix
+  socket. Sessions authenticate with a token stored in the state directory. The daemon
+  answers `initialize` from cache, routes each session's requests and diagnostics to
+  that session, and keeps a document open while any session has it open. A session's
+  `shutdown` disconnects only that session.
+- After 30 minutes without a session, the daemon stops the server and exits.
+  `LOCAL_LSP_SHARE_IDLE_MS` sets another delay.
+- Tokens and the daemon log, which includes the server's stderr, live in
+  `%LOCALAPPDATA%\local-lsp\share` on Windows and `~/.cache/local-lsp/share`
+  elsewhere. `LOCAL_LSP_SHARE_DIR` sets another directory.
+- `LOCAL_LSP_SHARE=off` gives each session its own server, as before. To stop a
+  shared server early, end its `node … lsp-share.mjs --daemon` process.
+- Dart requests wait up to 180 s (`requestTimeout`) instead of Claude Code's 60 s
+  default, which covers the first analysis. Claude Code rejects unknown keys in
+  `lspServers`, so this plugin needs Claude Code `2.1.288` or later.
+- The server is the `dart` found first on PATH. Put the project's SDK first
+  (`<flutter>/bin` or `<flutter>/bin/cache/dart-sdk/bin`): with another SDK, the
+  analysis may differ from the editor's and cannot reuse its cache. Restart the
+  client after changing PATH.
+- Copilot CLI starts `dart language-server` directly, without sharing.
+
+Not runtime-tested: a client that kills every process of its session job could also
+end the daemon. Each session would then start its own server again.
+
 ## Configuration and verification
 
 `lsp-config/claude.json` is the source of truth. After changing its mappings, run:
@@ -146,7 +179,8 @@ npm test
 node scripts/verify-semantic.mjs
 ```
 
-`sync` generates Copilot's `lsp-config/servers.json`; tests reject stale mappings.
+`sync` generates Copilot's `lsp-config/servers.json`, with shared servers replaced
+by their direct command; tests reject stale mappings.
 The Codex launcher reads the source directly. Claude's manifest explicitly
 references the source because a root `.lsp.json` is also discovered by Copilot,
 which expects a different JSON shape. Separate manifests keep native clients from

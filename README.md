@@ -8,6 +8,8 @@ Le plugin [local-lsp](plugins/local-lsp/README.md) fournit la navigation sémant
 
 - Installer les serveurs de langage nécessaires et rendre leurs commandes accessibles dans le `PATH` du client.
 - Pour Codex, disposer de Node.js 20 ou supérieur et de `lspi` 0.2.0, installé séparément.
+- Pour Claude Code, utiliser la version 2.1.288 ou supérieure.
+- Pour Dart, placer en tête du `PATH` le SDK utilisé par le projet. Le serveur Dart est partagé entre les sessions pour éviter de réanalyser le projet à chaque démarrage.
 
 Les commandes, les limites de prise en charge et les vérifications disponibles sont détaillées dans le [README du plugin](plugins/local-lsp/README.md).
 

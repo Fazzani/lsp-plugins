@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -26,6 +26,16 @@ test('all native extension mappings preserve their language IDs in the MCP bridg
     }
   }
   assert.deepEqual(Object.keys(source).sort(), ['csharp', 'dart', 'php', 'python', 'terraform', 'typescript', 'yaml']);
+});
+
+test('the bridge runs the shared Dart server through the plugin shim with its longer timeout', () => {
+  const { servers } = bridgeConfig(source, process.cwd());
+  const dart = servers.find((server) => server.id === 'dart-dart');
+  assert.equal(dart.command, process.execPath);
+  assert(existsSync(dart.args[0]), `${dart.args[0]} must exist`);
+  assert.deepEqual(dart.args.slice(1), ['dart', 'language-server', '--protocol=lsp']);
+  assert.equal(dart.request_timeout_ms, 180000);
+  for (const server of servers.filter((entry) => entry !== dart)) assert.equal(server.request_timeout_ms, 60000);
 });
 
 test('Windows PATH lookup resolves cmd and bat shims, including paths containing spaces', () => {

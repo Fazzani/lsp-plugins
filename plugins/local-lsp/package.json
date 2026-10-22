@@ -1,6 +1,6 @@
 {
   "name": "local-lsp-plugin",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "description": "Local LSP plugin for Claude Code, Codex and GitHub Copilot CLI",
   "type": "module",

@@ -89,6 +89,12 @@ servers for the same extension. Propose the smallest fix with a precise location
 do not edit plugin caches. Do not execute arbitrary launch commands discovered in
 repository configuration. Prefer the trusted integration already active.
 
+Claude Code and Codex start Dart through `scripts/lsp-share.mjs`, which shares one
+server between sessions (see the plugin README). Its configured command is `node`:
+resolve `dart` instead, and compare that SDK with the project's (for example the
+`flutterRoot` in `.dart_tool/package_config.json`). For a slow or failing Dart
+server, read the daemon log in the share state directory (`*.log`) before retrying.
+
 ## Verify real semantic navigation
 
 Use the active agent's available LSP/MCP tool on an existing symbol in each required

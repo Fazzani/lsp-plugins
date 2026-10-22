@@ -3,7 +3,9 @@ import { spawn } from 'node:child_process';
 import { accessSync, constants, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const PLUGIN_ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/[\\/]$/, '');
 
 export function findExecutable(command, path = process.env.PATH ?? '', platform = process.platform) {
   const suffixes = platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : [''];
@@ -32,13 +34,14 @@ export function bridgeConfig(source, workspaceRoot) {
       return Object.entries(languages).map(([language, extensions]) => ({
         id: `${name}-${language}`,
         kind: 'generic',
-        command: findExecutable(server.command),
-        args: server.args,
+        // Shared servers run through node and the plugin's lsp-share.mjs, as in Claude Code.
+        command: server.command === 'node' ? process.execPath : findExecutable(server.command),
+        args: server.args.map((arg) => arg.replaceAll('${CLAUDE_PLUGIN_ROOT}', PLUGIN_ROOT)),
         extensions: extensions.map(([extension]) => extension.slice(1)),
         language_id: language,
         root_dir: workspaceRoot,
         initialize_timeout_ms: 60000,
-        request_timeout_ms: 60000,
+        request_timeout_ms: server.requestTimeout ?? 60000,
         ...(name === 'typescript' ? { adapter: 'tsserver' } : {}),
       }));
     }),

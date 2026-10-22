@@ -47,11 +47,12 @@
     }
   },
   "dart": {
-    "command": "dart",
-    "args": ["language-server", "--protocol=lsp"],
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/lsp-share.mjs", "dart", "language-server", "--protocol=lsp"],
     "extensionToLanguage": {
       ".dart": "dart"
-    }
+    },
+    "requestTimeout": 180000
   },
   "php": {
     "command": "phpantom_lsp",
